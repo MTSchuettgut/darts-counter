@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Darts-Counter: Kamera-Test</title>
+<style>
+  :root { --bg:#10151c; --card:#1b2330; --text:#e8edf3; --muted:#9aa7b5; --accent:#4cc38a; --warn:#f0b34a; --err:#ef6a6a; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:16px; background:var(--bg); color:var(--text); font:16px/1.45 -apple-system, system-ui, "Segoe UI", sans-serif; }
+  h1 { font-size:1.25rem; margin:0 0 4px; }
+  p.sub { margin:0 0 14px; color:var(--muted); }
+  .row { display:flex; flex-wrap:wrap; gap:8px; margin:10px 0; }
+  button, select { font:inherit; padding:12px 16px; border-radius:10px; border:0; background:var(--card); color:var(--text); }
+  button.primary { background:var(--accent); color:#06210f; font-weight:600; }
+  button:disabled { opacity:.45; }
+  .stage { position:relative; width:100%; background:#000; border-radius:12px; overflow:hidden; }
+  video { display:block; width:100%; height:auto; }
+  .status { background:var(--card); border-radius:12px; padding:12px 14px; margin-top:12px; font-size:.95rem; }
+  .status dt { color:var(--muted); float:left; clear:left; width:9.5em; }
+  .status dd { margin:0 0 4px 9.5em; }
+  .msg { margin-top:12px; padding:12px 14px; border-radius:12px; background:var(--card); }
+  .msg.err { border-left:4px solid var(--err); }
+  .msg.ok { border-left:4px solid var(--accent); }
+  .msg.warn { border-left:4px solid var(--warn); }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<h1>Darts-Counter: Kamera-Test</h1>
+<p class="sub">Schritt 1: Zeigt die Seite das Kamerabild auf dem iPad?</p>
+
+<div id="hinweis" class="msg hidden"></div>
+
+<div class="row">
+  <button id="start" class="primary">Kamera starten</button>
+  <button id="stop" disabled>Stoppen</button>
+  <select id="kamera" aria-label="Kamera wählen" disabled></select>
+</div>
+
+<div class="stage"><video id="bild" autoplay playsinline muted></video></div>
+
+<dl class="status" id="status">
+  <dt>Verbindung</dt><dd id="s-https">–</dd>
+  <dt>Kamera</dt><dd id="s-name">–</dd>
+  <dt>Bildgröße</dt><dd id="s-groesse">–</dd>
+  <dt>Bilder pro Sekunde</dt><dd id="s-fps">–</dd>
+</dl>
+
+<script>
+(function () {
+  "use strict";
+  var bild = document.getElementById("bild");
+  var startBtn = document.getElementById("start");
+  var stopBtn = document.getElementById("stop");
+  var wahl = document.getElementById("kamera");
+  var hinweis = document.getElementById("hinweis");
+  var sHttps = document.getElementById("s-https");
+  var sName = document.getElementById("s-name");
+  var sGroesse = document.getElementById("s-groesse");
+  var sFps = document.getElementById("s-fps");
+  var strom = null;
+  var zaehler = null;
+
+  function melde(art, text) {
+    hinweis.className = "msg " + art;
+    hinweis.textContent = text;
+  }
+  function verstecke() { hinweis.className = "msg hidden"; hinweis.textContent = ""; }
+
+  // Sicherer Zugang? Safari gibt die Kamera nur auf https (oder localhost) frei.
+  var sicher = window.isSecureContext;
+  sHttps.textContent = sicher ? "sicher (https), Kamera erlaubt" : "NICHT sicher, Kamera wird gesperrt";
+  if (!sicher) {
+    melde("err", "Diese Seite läuft nicht über https. Safari gibt die Kamera hier nicht frei. Die Seite muss über eine https-Adresse geöffnet werden.");
+  }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    melde("err", "Dieser Browser bietet keinen Kamerazugriff an (mediaDevices fehlt).");
+    startBtn.disabled = true;
+  }
+
+  function stoppe() {
+    if (strom) { strom.getTracks().forEach(function (t) { t.stop(); }); strom = null; }
+    if (zaehler) { clearInterval(zaehler); zaehler = null; }
+    bild.srcObject = null;
+    stopBtn.disabled = true;
+    startBtn.disabled = false;
+    sName.textContent = "–"; sGroesse.textContent = "–"; sFps.textContent = "–";
+  }
+
+  function fuelleListe(aktuelleId) {
+    return navigator.mediaDevices.enumerateDevices().then(function (liste) {
+      var kameras = liste.filter(function (d) { return d.kind === "videoinput"; });
+      wahl.innerHTML = "";
+      kameras.forEach(function (k, i) {
+        var o = document.createElement("option");
+        o.value = k.deviceId;
+        o.textContent = k.label || ("Kamera " + (i + 1));
+        if (k.deviceId === aktuelleId) o.selected = true;
+        wahl.appendChild(o);
+      });
+      wahl.disabled = kameras.length < 2;
+    });
+  }
+
+  function zaehleFps() {
+    var letzte = 0, bilder = 0, t0 = performance.now();
+    function tick(jetzt, meta) {
+      bilder++;
+      if (jetzt - t0 >= 1000) {
+        sFps.textContent = (bilder * 1000 / (jetzt - t0)).toFixed(1);
+        bilder = 0; t0 = jetzt;
+      }
+      bild.requestVideoFrameCallback(tick);
+    }
+    if ("requestVideoFrameCallback" in HTMLVideoElement.prototype) {
+      bild.requestVideoFrameCallback(tick);
+    } else {
+      sFps.textContent = "nicht messbar in diesem Browser";
+    }
+  }
+
+  function starte(deviceId) {
+    stoppe();
+    verstecke();
+    var wunsch = { audio: false, video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } } };
+    if (deviceId) { wunsch.video.deviceId = { exact: deviceId }; }
+    else { wunsch.video.facingMode = { ideal: "environment" }; }
+    startBtn.disabled = true;
+    navigator.mediaDevices.getUserMedia(wunsch).then(function (s) {
+      strom = s;
+      bild.srcObject = s;
+      var spur = s.getVideoTracks()[0];
+      var einst = spur.getSettings();
+      sName.textContent = spur.label || "unbekannt";
+      var anzeige = function () {
+        sGroesse.textContent = bild.videoWidth + " × " + bild.videoHeight;
+      };
+      bild.onloadedmetadata = anzeige;
+      anzeige();
+      stopBtn.disabled = false;
+      zaehleFps();
+      melde("ok", "Kamera läuft. Wenn du dein Bild siehst, ist Schritt 1 geschafft.");
+      return fuelleListe(einst.deviceId);
+    }).catch(function (fehler) {
+      startBtn.disabled = false;
+      var name = fehler && fehler.name;
+      var text = "Die Kamera startet nicht (" + (name || "unbekannter Fehler") + ").";
+      if (name === "NotAllowedError") text += " Der Zugriff wurde verweigert. In den iPad-Einstellungen unter Safari, Kamera, diese Seite erlauben.";
+      else if (name === "NotFoundError") text += " Es wurde keine Kamera gefunden.";
+      else if (name === "NotReadableError") text += " Eine andere App nutzt die Kamera.";
+      melde("err", text);
+    });
+  }
+
+  startBtn.addEventListener("click", function () { starte(null); });
+  stopBtn.addEventListener("click", stoppe);
+  wahl.addEventListener("change", function () { starte(wahl.value); });
+  window.addEventListener("pagehide", stoppe);
+})();
+</script>
+</body>
+</html>
